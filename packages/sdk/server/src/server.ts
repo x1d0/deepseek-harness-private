@@ -6,13 +6,14 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { admitEncodedImages, type EncodedImageAttachment, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, ReasoningEffortId, type ContentBlock, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf, type Scoped } from '@deepseek-ai/dsh-scope'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
@@ -21,8 +22,15 @@ import type {
   InitializeResult,
   JsonRpcTransportPeer,
   SessionEventNotification,
+  SessionHistoryParams,
+  SessionHistoryResult,
+  SessionListEntry,
+  SessionListParams,
+  SessionListResult,
   SessionPromptParams,
   SessionPromptResult,
+  SessionResumeParams,
+  SessionResumeResult,
   SdkEncodedImageBlock,
   SubagentFinishedNotification,
   SubagentStartedNotification,
@@ -32,8 +40,73 @@ interface SessionRecord {
   handle: AgentHandle
 }
 
+/**
+ * The slice of the deployment's `sessionQuery` service this server reads.
+ *
+ * Declared structurally on purpose: this plugin needs two read methods, and
+ * the service lives in the deployment layer (`dsh-base` mounts
+ * `session-query-sqlite`). Keeping no package dependency on it lets an
+ * `sdk-minimal` deployment boot — only `session/list` and `session/history`
+ * fail there, with a message naming the missing service.
+ */
+interface SessionQueryReader {
+  /** Newest-first live-preferred session records. */
+  listSessions(): Promise<readonly QuerySessionRecord[]>
+  /** One session's complete replay-validated log; rejects for an unknown id. */
+  readSession(sessionId: SessionId): Promise<QuerySessionLog>
+  /** Latest folded title, or `undefined` when the log has no title event. */
+  readTitle(sessionId: SessionId): Promise<{ readonly title: string } | undefined>
+}
+
+/** Session identity a query read reports (a structural subset of `SessionHeader`). */
+interface QuerySessionRecord {
+  readonly header: { readonly id: SessionId; readonly cwd?: string; readonly createdAt: number }
+  readonly live: boolean
+  readonly persisted: boolean
+}
+
+/** One complete session log as a query read reports it. */
+interface QuerySessionLog {
+  readonly session: { readonly id: SessionId; readonly cwd?: string; readonly createdAt: number }
+  readonly events: SessionEvent[]
+}
+
+/**
+ * Whether two paths denote the same existing directory, following symlinks.
+ *
+ * Mirrors the ACP front end's check: a session that recorded no working
+ * directory never matches (resuming it would run its tools somewhere the
+ * history does not describe), and an unresolvable path falls back to a literal
+ * comparison so a deleted directory still yields a usable answer.
+ */
+async function sameDirectory(left: string | undefined, right: string): Promise<boolean> {
+  if (left === undefined) return false
+  try {
+    const [realLeft, realRight] = await Promise.all([realpath(left), realpath(right)])
+    return realLeft === realRight
+  } catch {
+    return resolve(left) === resolve(right)
+  }
+}
+
 function encodedImage(block: SessionPromptParams['contentBlocks'][number]): block is SdkEncodedImageBlock {
   return block.type === 'image' && 'data' in block
+}
+
+/** Validate one JSON-RPC `limit` field before it reaches a slice. */
+function assertPositiveLimit(method: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${method} limit must be a positive safe integer`)
+  }
+  return value
+}
+
+/** Validate one JSON-RPC session id field. */
+function assertSessionId(method: string, value: string): SessionId {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(`${method} sessionId must be a non-empty string`)
+  }
+  return brandString<SessionId>(value)
 }
 
 async function durablePromptContent(ctx: Context, blocks: SessionPromptParams['contentBlocks']): Promise<ContentBlock[]> {
@@ -192,6 +265,127 @@ export class HarnessSdkJsonRpcServer {
     return { messageId: message.id }
   }
 
+  /**
+   * List the runtime's session corpus, newest first.
+   *
+   * Reads the deployment's `sessionQuery` service: the SDK profile mounts it
+   * (`dsh-base`), while `sdk-minimal` does not and gets an explanatory error.
+   * @param params - optional working-directory filter and result cap.
+   * @returns matching session descriptors, newest first.
+   */
+  async listSessions(params: SessionListParams): Promise<SessionListResult> {
+    this.assertInitialized()
+    const query = this.sessionQuery()
+    const records = await query.listSessions()
+    const matching = params.cwd === undefined ? records : records.filter(record => record.header.cwd === params.cwd)
+    const limit = params.limit === undefined ? undefined : assertPositiveLimit('session/list', params.limit)
+    const limited = limit === undefined ? matching : matching.slice(0, limit)
+    const sessions: SessionListEntry[] = []
+    for (const record of limited) {
+      const title = await query.readTitle(record.header.id)
+      sessions.push({
+        sessionId: String(record.header.id),
+        ...record.header.cwd === undefined ? {} : { cwd: record.header.cwd },
+        createdAt: record.header.createdAt,
+        ...title === undefined ? {} : { title: title.title },
+        live: record.live,
+        persisted: record.persisted,
+      })
+    }
+    return { sessions }
+  }
+
+  /**
+   * Read one session's raw persisted log without making it live.
+   *
+   * The log is returned exactly as recorded (the same event vocabulary the
+   * `session.event` notification carries), so a client can render history with
+   * the rendering it already has. Pass `limit` to fetch the newest events only.
+   * @param params - target session and optional event cap.
+   * @returns session identity plus its log events.
+   */
+  async sessionHistory(params: SessionHistoryParams): Promise<SessionHistoryResult> {
+    this.assertInitialized()
+    const query = this.sessionQuery()
+    const sessionId = assertSessionId('session/history', params.sessionId)
+    const snapshot = await query.readSession(sessionId)
+    const all = snapshot.events
+    const cap = params.limit === undefined ? undefined : assertPositiveLimit('session/history', params.limit)
+    const events = cap === undefined || all.length <= cap ? all : all.slice(all.length - cap)
+    const title = await query.readTitle(sessionId)
+    return {
+      session: {
+        sessionId: String(snapshot.session.id),
+        ...snapshot.session.cwd === undefined ? {} : { cwd: snapshot.session.cwd },
+        createdAt: snapshot.session.createdAt,
+        ...title === undefined ? {} : { title: title.title },
+      },
+      events,
+      truncated: events.length !== all.length,
+    }
+  }
+
+  /**
+   * Make a persisted session live again so later prompts continue its history.
+   *
+   * Unlike `session/prompt`, this never creates a session: an unknown id is an
+   * error (the underlying `agents.resume` rejection), and the persisted header's
+   * working directory must match the one `initialize` fixed — resuming a session
+   * into a different directory would silently run its tools somewhere the
+   * history does not describe, so that is refused rather than guessed. Calling
+   * it for a session that is already live here is a no-op.
+   *
+   * Resuming does not replay history to the client; use `session/history` for
+   * that.
+   * @param params - the persisted session to resume.
+   * @returns the session id and whether this call resumed it.
+   */
+  async resumeSession(params: SessionResumeParams): Promise<SessionResumeResult> {
+    this.assertInitialized()
+    const sessionId = assertSessionId('session/resume', params.sessionId)
+    const existing = this.sessions.get(sessionId)
+    if (existing !== undefined) {
+      this.assertLiveAgent(existing, sessionId)
+      return { sessionId, resumed: false }
+    }
+    // Resume through the agent layer, then validate the restored header the way
+    // the ACP front end does: `initialize`'s cwd is the client's contract, and a
+    // session that belongs elsewhere is disposed instead of run.
+    const handle = await this.ctx.agents.resume({
+      resumeSessionId: brandString<SessionId>(sessionId),
+      agentOptions: this.agentOptions(),
+    })
+    const restored = handle.agent.session.header.cwd
+    if (!await sameDirectory(restored, this.cwd)) {
+      await handle.dispose()
+      throw new Error(
+        `session "${sessionId}" was created in ${restored ?? '(no recorded working directory)'}, `
+        + `but this runtime is initialized for ${this.cwd}; `
+        + 'start the runtime in the session\'s directory (or omit session/resume and create a new session)',
+      )
+    }
+    this.sessions.set(sessionId, { handle })
+    return { sessionId, resumed: true }
+  }
+
+  private assertInitialized(): void {
+    if (!this.initialized) throw new Error('SDK server is not initialized')
+  }
+
+  /** Read the deployment's session corpus service, or explain what is missing. */
+  private sessionQuery(): SessionQueryReader {
+    // The service is not a declared dependency (see {@link SessionQueryReader}),
+    // so it is read through a widened context rather than the typed registry.
+    const service = (this.ctx as unknown as { get(key: string): unknown }).get('sessionQuery')
+    if (service === undefined) {
+      throw new Error(
+        'session/list and session/history require the sessionQuery service, which this deployment does not mount '
+        + '(dsh-base provides it; sdk-minimal does not)',
+      )
+    }
+    return service as SessionQueryReader
+  }
+
   private assertLiveAgent(rec: SessionRecord, sessionId: string): void {
     if (this.ctx.agents.get(rec.handle.agent.id) !== rec.handle.agent) {
       throw new Error(`session agent was disposed outside the server: ${sessionId}`)
@@ -249,6 +443,12 @@ export class HarnessSdkJsonRpcServer {
         return this.initialize(params as unknown as InitializeParams)
       case 'session/prompt':
         return this.prompt(params as unknown as SessionPromptParams)
+      case 'session/list':
+        return this.listSessions(params as unknown as SessionListParams)
+      case 'session/history':
+        return this.sessionHistory(params as unknown as SessionHistoryParams)
+      case 'session/resume':
+        return this.resumeSession(params as unknown as SessionResumeParams)
       case 'shutdown':
         return this.shutdown()
       default:
@@ -279,16 +479,21 @@ export class HarnessSdkJsonRpcServer {
     const handle = await this.ctx.agents.create({
       sessionId: brandString<SessionId>(sessionId),
       meta: { cwd: this.cwd },
-      agentOptions: {
-        provider: this.provider,
-        model: this.model,
-        ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
-        ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
-      },
+      agentOptions: this.agentOptions(),
     })
     const rec: SessionRecord = { handle }
     this.sessions.set(sessionId, rec)
     return rec
+  }
+
+  /** Route and caps every SDK-created or SDK-resumed agent inherits from `initialize`. */
+  private agentOptions(): NonNullable<CreateAgentOptions['agentOptions']> {
+    return {
+      provider: this.provider,
+      model: this.model,
+      ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
+      ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
+    }
   }
 
   private hasAdapterFor(provider: string): boolean {

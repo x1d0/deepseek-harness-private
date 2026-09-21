@@ -1200,3 +1200,163 @@ describe('HarnessSdkJsonRpcServer', () => {
     expect(on).toHaveBeenCalledTimes(4)
   })
 })
+
+/** Session fixture for the session-surface tests (the real corpus is session-query-sqlite). */
+interface StubSession {
+  id: string
+  cwd?: string
+  createdAt: number
+  title?: string
+  live?: boolean
+  persisted?: boolean
+  events?: unknown[]
+}
+
+/** Provide a `sessionQuery` stand-in over fixed fixtures. */
+function provideSessionQuery(ctx: Context, sessions: StubSession[]): void {
+  ctx.provide('sessionQuery', {
+    listSessions: () => Promise.resolve([...sessions]
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .map(session => ({
+        header: { id: session.id, cwd: session.cwd, createdAt: session.createdAt },
+        live: session.live ?? false,
+        persisted: session.persisted ?? true,
+      }))),
+    readSession: (sessionId: string) => {
+      const session = sessions.find(candidate => candidate.id === sessionId)
+      if (session === undefined) return Promise.reject(new Error(`session "${sessionId}" does not exist`))
+      return Promise.resolve({
+        session: { id: session.id, cwd: session.cwd, createdAt: session.createdAt },
+        events: session.events ?? [],
+      })
+    },
+    readTitle: (sessionId: string) => {
+      const title = sessions.find(candidate => candidate.id === sessionId)?.title
+      return Promise.resolve(title === undefined ? undefined : { title })
+    },
+  })
+}
+
+/** A context whose only real service is the LLM seam `initialize` reads. */
+function stubContext(provided: Record<string, unknown> = {}): Context {
+  const services: Record<string, unknown> = { ...provided }
+  return {
+    on: () => () => {},
+    provide: (key: string, value: unknown) => { services[key] = value },
+    get: (key: string) => key === 'llm'
+      ? { resolveCallConfig: () => Promise.resolve({}), listProviders: () => [{ id: 'deepseek-official' }] }
+      : services[key],
+  } as unknown as Context
+}
+
+describe('session surface', () => {
+  it('lists the corpus newest first with titles, cwd filter and limit', async () => {
+    const ctx = stubContext()
+    provideSessionQuery(ctx, [
+      { id: 'older', cwd: '/work/one', createdAt: 1_000, title: '第一条' },
+      { id: 'newer', cwd: '/work/two', createdAt: 3_000 },
+      { id: 'middle', cwd: '/work/one', createdAt: 2_000, live: true },
+    ])
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    await server.initialize({ cwd: '/work/one', provider: 'deepseek-official', model: 'plain-model' })
+
+    const all = await server.listSessions({}) as { sessions: { sessionId: string; title?: string; cwd?: string; live: boolean }[] }
+    expect(all.sessions.map(session => session.sessionId)).toEqual(['newer', 'middle', 'older'])
+    expect(all.sessions[2]?.title).toBe('第一条')
+    expect(all.sessions[1]?.live).toBe(true)
+
+    const filtered = await server.listSessions({ cwd: '/work/one' }) as { sessions: { sessionId: string }[] }
+    expect(filtered.sessions.map(session => session.sessionId)).toEqual(['middle', 'older'])
+
+    const limited = await server.listSessions({ limit: 1 }) as { sessions: { sessionId: string }[] }
+    expect(limited.sessions.map(session => session.sessionId)).toEqual(['newer'])
+
+    await expect(server.listSessions({ limit: 0 })).rejects.toThrow(/positive safe integer/)
+  })
+
+  it('reads one session log and reports truncation', async () => {
+    const events = [{ type: 'turn/start', seq: 0 }, { type: 'user/message', seq: 1 }, { type: 'turn/end', seq: 2 }]
+    const ctx = stubContext()
+    provideSessionQuery(ctx, [{ id: 'main', cwd: '/work/one', createdAt: 5, title: '标题', events }])
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    await server.initialize({ cwd: '/work/one', provider: 'deepseek-official', model: 'plain-model' })
+
+    const full = await server.sessionHistory({ sessionId: 'main' }) as { session: { sessionId: string; title?: string }; events: unknown[]; truncated: boolean }
+    expect(full.session.sessionId).toBe('main')
+    expect(full.session.title).toBe('标题')
+    expect(full.events).toHaveLength(3)
+    expect(full.truncated).toBe(false)
+
+    const tail = await server.sessionHistory({ sessionId: 'main', limit: 2 }) as { events: { seq: number }[]; truncated: boolean }
+    expect(tail.events.map(event => event.seq)).toEqual([1, 2])
+    expect(tail.truncated).toBe(true)
+
+    await expect(server.sessionHistory({ sessionId: 'nope' })).rejects.toThrow(/does not exist/)
+    await expect(server.sessionHistory({ sessionId: '' })).rejects.toThrow(/non-empty string/)
+  })
+
+  it('explains the missing corpus service instead of failing obscurely', async () => {
+    const ctx = stubContext()
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    await server.initialize({ cwd: '/work/one', provider: 'deepseek-official', model: 'plain-model' })
+    await expect(server.listSessions({})).rejects.toThrow(/require the sessionQuery service/)
+    await expect(server.sessionHistory({ sessionId: 'main' })).rejects.toThrow(/require the sessionQuery service/)
+  })
+
+  it('routes the new methods through handleRequest', async () => {
+    const ctx = stubContext()
+    provideSessionQuery(ctx, [{ id: 'main', cwd: '/work/one', createdAt: 7, events: [] }])
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    await expect(server.handleRequest('session/list', {})).rejects.toThrow(/not initialized/)
+    await server.handleRequest('initialize', { cwd: '/work/one', provider: 'deepseek-official', model: 'plain-model' })
+    const listed = await server.handleRequest('session/list', {}) as { sessions: unknown[] }
+    expect(listed.sessions).toHaveLength(1)
+    const history = await server.handleRequest('session/history', { sessionId: 'main' }) as { events: unknown[] }
+    expect(history.events).toEqual([])
+  })
+
+  it('resumes a persisted session and refuses one that belongs elsewhere', { timeout: 30_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-resume-'))
+    const otherDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-resume-other-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir)
+    try {
+      // Seed two persisted sessions with real turns: a session with no events never
+      // materializes its log, so a prompt is what makes it resumable.
+      const first = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await first.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+      await first.prompt({ sessionId: 'seeded', contentBlocks: [{ type: 'text', text: 'first turn' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(1) })
+      await first.shutdown()
+
+      const other = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await other.initialize({ cwd: otherDir, provider: 'deepseek-official', model: 'plain-model' })
+      await other.prompt({ sessionId: 'elsewhere', contentBlocks: [{ type: 'text', text: 'other dir' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(2) })
+      await other.shutdown()
+
+      const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await server.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+
+      expect(await server.resumeSession({ sessionId: 'seeded' })).toEqual({ sessionId: 'seeded', resumed: true })
+      // Already live here: idempotent, not an error.
+      expect(await server.resumeSession({ sessionId: 'seeded' })).toEqual({ sessionId: 'seeded', resumed: false })
+      // A session recorded in another directory is refused instead of run somewhere its history does not describe.
+      await expect(server.resumeSession({ sessionId: 'elsewhere' })).rejects.toThrow(/was created in/)
+      await expect(server.resumeSession({ sessionId: 'unknown' })).rejects.toThrow()
+      // Resuming makes the session live: a follow-up prompt continues the SAME session
+      // (the seeded session's id is unchanged and its agent is the resumed one).
+      await server.prompt({ sessionId: 'seeded', contentBlocks: [{ type: 'text', text: 'second turn' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(3) })
+      const body = llmServer.requests[2] as { messages: { role: string; content?: unknown }[] }
+      expect(JSON.stringify(body.messages)).toContain('first turn')
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+      await rm(otherDir, { recursive: true, force: true })
+    }
+  })
+})
