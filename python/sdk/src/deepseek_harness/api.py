@@ -7,7 +7,13 @@ from typing import Callable
 
 from .client import HarnessClient, HarnessConfig
 from .errors import SdkProtocolError
-from .models import JsonObject, Notification
+from .models import (
+    JsonObject,
+    Notification,
+    SessionHistoryResult,
+    SessionListResult,
+    SessionResumeResult,
+)
 
 
 @dataclass(slots=True)
@@ -130,11 +136,27 @@ class DeepSeekHarness:
     ) -> RunResult:
         return self.start_session(session_id).run(input, on_notification=on_notification)
 
+    def list_sessions(self, *, cwd: str | None = None, limit: int | None = None) -> SessionListResult:
+        self.start()
+        return self._client.list_sessions(cwd=cwd, limit=limit)
+
+    def session_history(self, session_id: str, *, limit: int | None = None) -> SessionHistoryResult:
+        self.start()
+        return self._client.session_history(session_id, limit=limit)
+
+    def resume_session(self, session_id: str) -> SessionResumeResult:
+        self.start()
+        return self._client.resume_session(session_id)
+
 
 class Session:
     def __init__(self, harness: DeepSeekHarness, session_id: str) -> None:
         self.harness = harness
         self.id = session_id
+
+    def resume(self) -> bool:
+        self.harness.start()
+        return self.harness.client.resume_session(self.id).resumed
 
     def run(
         self,

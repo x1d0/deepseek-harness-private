@@ -731,3 +731,52 @@ describe('pure helpers', () => {
     ])).toBe('ab')
   })
 })
+
+describe('session surface', () => {
+  it('lists the runtime session corpus with its descriptor fields', async () => {
+    const entry = {
+      sessionId: 'session-a',
+      cwd: '/tmp/project',
+      createdAt: 7,
+      title: 'first turn',
+      live: true,
+      persisted: true,
+    }
+    const harness = harnessWith({ FAKE_SESSION_LIST_JSON: JSON.stringify([entry]) })
+    await expect(harness.listSessions()).resolves.toEqual({ sessions: [entry] })
+    await expect(harness.listSessions({ cwd: '/tmp/project', limit: 1 })).resolves.toEqual({ sessions: [entry] })
+  })
+
+  it('reads one persisted log together with its truncation flag', async () => {
+    const payload = {
+      session: { sessionId: 'session-a', createdAt: 7, title: 'first turn' },
+      events: [{ type: 'session/title', seq: 0, time: 1, data: { title: 'first turn' } }],
+      truncated: true,
+    }
+    const harness = harnessWith({ FAKE_SESSION_HISTORY_JSON: JSON.stringify(payload) })
+    await expect(harness.sessionHistory({ sessionId: 'session-a', limit: 1 })).resolves.toEqual(payload)
+  })
+
+  it('resumes a persisted session once, then reports the idempotent repeat', async () => {
+    const harness = harnessWith()
+    await expect(harness.resumeSession({ sessionId: 'session-a' }))
+      .resolves.toEqual({ sessionId: 'session-a', resumed: true })
+    await expect(harness.resumeSession({ sessionId: 'session-a' }))
+      .resolves.toEqual({ sessionId: 'session-a', resumed: false })
+    // The session handle exposes the same call for its own id.
+    await expect(harness.session('session-a').resume()).resolves.toBe(false)
+  })
+
+  it('propagates the runtime refusal to resume an unknown session', async () => {
+    const harness = harnessWith({ FAKE_RESUME_ERROR: '1' })
+    await expect(harness.resumeSession({ sessionId: 'session-missing' }))
+      .rejects.toThrow(/session-missing not found/)
+  })
+
+  it('rejects a malformed session-surface payload as a protocol error', async () => {
+    const harness = harnessWith({ FAKE_MALFORMED_SESSION: '1' })
+    await expect(harness.listSessions()).rejects.toThrow(SdkProtocolError)
+    await expect(harness.sessionHistory({ sessionId: 'session-a' })).rejects.toThrow(SdkProtocolError)
+    await expect(harness.resumeSession({ sessionId: 'session-a' })).rejects.toThrow(SdkProtocolError)
+  })
+})

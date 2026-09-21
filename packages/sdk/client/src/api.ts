@@ -9,6 +9,14 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
+import type {
+  SessionHistoryParams,
+  SessionHistoryResult,
+  SessionListParams,
+  SessionListResult,
+  SessionResumeParams,
+  SessionResumeResult,
+} from '@deepseek-ai/dsh-sdk-protocol'
 import { createProcessHarnessClient, HarnessClient, isRecord, SdkProtocolError } from './client.ts'
 import type { RuntimeProcessOptions } from './launch.ts'
 import type { ContentBlock, DeepSeekHarnessOptions, HarnessNotification, RunResult, SdkPromptContentBlock } from './types.ts'
@@ -115,6 +123,37 @@ export class DeepSeekHarness implements AsyncDisposable {
   }
 
   /**
+   * List the runtime's session corpus, newest first.
+   * @param params - optional exact-`cwd` filter and positive result cap.
+   * @returns the runtime's descriptors, newest first.
+   */
+  async listSessions(params: SessionListParams = {}): Promise<SessionListResult> {
+    await this.start()
+    return this.client.listSessions(params)
+  }
+
+  /**
+   * Read one persisted session's raw log without making it live.
+   * @param params - target session and optional newest-events cap.
+   * @returns the session identity, its log events, and the truncation flag.
+   */
+  async sessionHistory(params: SessionHistoryParams): Promise<SessionHistoryResult> {
+    await this.start()
+    return this.client.sessionHistory(params)
+  }
+
+  /**
+   * Make a persisted session live again so a later {@link session} run on the
+   * same id continues its history instead of creating a session.
+   * @param params - the persisted session to resume.
+   * @returns the session id plus whether this call is the one that resumed it.
+   */
+  async resumeSession(params: SessionResumeParams): Promise<SessionResumeResult> {
+    await this.start()
+    return this.client.resumeSession(params)
+  }
+
+  /**
    * Shut down and reap the runtime subprocess. Idempotent and terminal —
    * a closed harness no longer retries a failed handshake.
    * @returns settlement of the complete teardown.
@@ -165,6 +204,17 @@ export class HarnessSession {
    * @param id - the wire session id this handle runs on.
    */
   constructor(readonly harness: DeepSeekHarness, readonly id: string) {}
+
+  /**
+   * Resume this session's persisted history in the runtime, so the next
+   * {@link run} continues it instead of creating a session.
+   * @returns whether this call is the one that resumed the session.
+   */
+  async resume(): Promise<boolean> {
+    await this.harness.start()
+    const result = await this.harness.client.resumeSession({ sessionId: this.id })
+    return result.resumed
+  }
 
   /**
    * Queue one prompt, then observe the whole session through its next idle.

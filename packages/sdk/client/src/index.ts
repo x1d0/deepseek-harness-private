@@ -20,6 +20,16 @@ export {
 export type { NotificationSubscription } from './client.ts'
 export { JsonRpcResponseError } from '@deepseek-ai/dsh-sdk-protocol'
 export type {
+  SessionDescriptor,
+  SessionHistoryParams,
+  SessionHistoryResult,
+  SessionListEntry,
+  SessionListParams,
+  SessionListResult,
+  SessionResumeParams,
+  SessionResumeResult,
+} from '@deepseek-ai/dsh-sdk-protocol'
+export type {
   ContentBlock,
   SdkPromptContentBlock,
   DeepSeekHarnessOptions,

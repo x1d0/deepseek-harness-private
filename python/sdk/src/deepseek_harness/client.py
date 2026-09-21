@@ -15,7 +15,16 @@ from typing import Callable, TypeAlias, TypeVar
 from pydantic import BaseModel
 
 from .errors import JsonRpcError, TransportClosedError
-from .models import IncomingRequest, InitializeResponse, JsonObject, JsonValue, Notification
+from .models import (
+    IncomingRequest,
+    InitializeResponse,
+    JsonObject,
+    JsonValue,
+    Notification,
+    SessionHistoryResult,
+    SessionListResult,
+    SessionResumeResult,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 NotificationFilter: TypeAlias = Callable[[Notification], bool]
@@ -187,6 +196,37 @@ class HarnessClient:
             notification_subscription=notification_subscription,
         )
         return response.messageId
+
+    def list_sessions(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int | None = None,
+    ) -> SessionListResult:
+        payload: JsonObject = {}
+        if cwd is not None:
+            payload["cwd"] = cwd
+        if limit is not None:
+            payload["limit"] = limit
+        return self.request("session/list", payload, response_model=SessionListResult)
+
+    def session_history(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+    ) -> SessionHistoryResult:
+        payload: JsonObject = {"sessionId": session_id}
+        if limit is not None:
+            payload["limit"] = limit
+        return self.request("session/history", payload, response_model=SessionHistoryResult)
+
+    def resume_session(self, session_id: str) -> SessionResumeResult:
+        return self.request(
+            "session/resume",
+            {"sessionId": session_id},
+            response_model=SessionResumeResult,
+        )
 
     def request(
         self,

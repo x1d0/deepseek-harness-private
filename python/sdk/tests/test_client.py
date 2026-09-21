@@ -1163,3 +1163,78 @@ def test_client_reports_missing_bundled_runtime_dependency(monkeypatch: pytest.M
 
     with pytest.raises(FileNotFoundError, match="Install deepseek-harness-runtime-bin"):
         HarnessClient(HarnessConfig(dsh_home="/explicit/home")).start()
+
+
+_SESSION_SURFACE_BRIDGE = """
+import json
+import sys
+
+resumed = set()
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake-dsh"}}}), flush=True)
+    elif method == "session/list":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessions": [{"sessionId": "session-a", "createdAt": 7, "cwd": "/workspace", "title": "first", "live": True, "persisted": True}]}}), flush=True)
+    elif method == "session/history":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"session": {"sessionId": params["sessionId"], "createdAt": 7}, "events": [{"type": "session/title", "seq": 0, "time": 1, "data": {"title": "first"}}], "truncated": True}}), flush=True)
+    elif method == "session/resume":
+        session_id = params["sessionId"]
+        if session_id == "session-missing":
+            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "session session-missing not found"}}), flush=True)
+            continue
+        first = session_id not in resumed
+        resumed.add(session_id)
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": session_id, "resumed": first}}), flush=True)
+    elif method == "shutdown":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
+        break
+""".strip()
+
+
+def _session_surface_bridge(tmp_path: Path) -> Path:
+    script = tmp_path / "fake_session_surface.py"
+    script.write_text(_SESSION_SURFACE_BRIDGE)
+    return script
+
+
+def test_client_mirrors_the_session_surface_requests(tmp_path: Path) -> None:
+    with HarnessClient(_launch_args=(sys.executable, str(_session_surface_bridge(tmp_path)))) as client:
+        client.initialize(provider="deepseek-official", cwd="/workspace", model="dsagent")
+
+        listing = client.list_sessions(cwd="/workspace", limit=1)
+        assert [entry.sessionId for entry in listing.sessions] == ["session-a"]
+        assert listing.sessions[0].live is True
+        assert listing.sessions[0].persisted is True
+        assert listing.sessions[0].title == "first"
+
+        history = client.session_history("session-a", limit=1)
+        assert history.session.sessionId == "session-a"
+        assert history.session.createdAt == 7
+        assert history.events[0]["type"] == "session/title"
+        assert history.truncated is True
+
+        assert client.resume_session("session-a").resumed is True
+        assert client.resume_session("session-a").resumed is False
+
+
+def test_client_propagates_a_session_resume_refusal(tmp_path: Path) -> None:
+    with HarnessClient(_launch_args=(sys.executable, str(_session_surface_bridge(tmp_path)))) as client:
+        client.initialize(provider="deepseek-official", cwd="/workspace", model="dsagent")
+        with pytest.raises(JsonRpcError) as refusal:
+            client.resume_session("session-missing")
+    assert refusal.value.code == -32603
+    assert "not found" in refusal.value.message
+
+
+def test_high_level_session_surface_mirrors_the_wire(tmp_path: Path) -> None:
+    with DeepSeekHarness(
+        _launch_args=(sys.executable, str(_session_surface_bridge(tmp_path))), cwd=str(tmp_path)
+    ) as harness:
+        assert harness.list_sessions().sessions[0].sessionId == "session-a"
+        assert harness.session_history("session-a").truncated is True
+        assert harness.resume_session("session-a").resumed is True
+        # The session handle resumes its own id: already live, so this is the idempotent repeat.
+        assert harness.start_session("session-a").resume() is False

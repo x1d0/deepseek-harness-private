@@ -47,6 +47,10 @@
  * - `FAKE_STDERR`: write this line to stderr at boot (diagnostics-tail probe).
  * - `FAKE_STDERR_NO_NEWLINE`: write this to stderr WITHOUT a newline (buffer-flush probe).
  * - `FAKE_RECORD_INIT`: append each `initialize` params JSON to this file (handshake probe).
+ * - `FAKE_SESSION_LIST_JSON`: JSON array answered as `session/list` sessions (default `[]`).
+ * - `FAKE_SESSION_HISTORY_JSON`: JSON object answered verbatim by `session/history`.
+ * - `FAKE_RESUME_ERROR`: answer `session/resume` with a JSON-RPC error (unknown-id probe).
+ * - `FAKE_MALFORMED_SESSION`: answer the three session-surface methods with `{}`.
  */
 
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
@@ -54,6 +58,9 @@ import process from 'node:process'
 import { createInterface } from 'node:readline'
 
 const env = process.env
+
+/** Ids this fake already resumed, so the second call reports the idempotent repeat. */
+const resumedIds = new Set<string>()
 
 if (env.FAKE_STDERR !== undefined) process.stderr.write(`${env.FAKE_STDERR}\n`)
 if (env.FAKE_STDERR_NO_NEWLINE !== undefined) process.stderr.write(env.FAKE_STDERR_NO_NEWLINE)
@@ -309,6 +316,42 @@ reader.on('line', (line) => {
       runTurn(sessionId)
       notify('session.status', { sessionId, status: 'idle' })
       respond({ messageId })
+      return
+    }
+    case 'session/list': {
+      if (env.FAKE_MALFORMED_SESSION !== undefined) {
+        respond({})
+        return
+      }
+      respond({ sessions: env.FAKE_SESSION_LIST_JSON === undefined ? [] : JSON.parse(env.FAKE_SESSION_LIST_JSON) })
+      return
+    }
+    case 'session/history':
+      if (env.FAKE_MALFORMED_SESSION !== undefined) {
+        respond({})
+        return
+      }
+      respond(env.FAKE_SESSION_HISTORY_JSON === undefined
+        ? { session: { sessionId: sessionIdOf(frame.params), createdAt: 0 }, events: [], truncated: false }
+        : JSON.parse(env.FAKE_SESSION_HISTORY_JSON))
+      return
+    case 'session/resume': {
+      if (env.FAKE_RESUME_ERROR !== undefined) {
+        write({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32603, message: `session ${sessionIdOf(frame.params)} not found` },
+        })
+        return
+      }
+      if (env.FAKE_MALFORMED_SESSION !== undefined) {
+        respond({})
+        return
+      }
+      const resumedId = sessionIdOf(frame.params)
+      const resumedNow = !resumedIds.has(resumedId)
+      resumedIds.add(resumedId)
+      respond({ sessionId: resumedId, resumed: resumedNow })
       return
     }
     case 'shutdown':
