@@ -116,6 +116,12 @@ function assertPositiveLimit(method: string, value: number): number {
   return value
 }
 
+/** Whether a resume failed because no persisted log exists for the id. */
+function isSessionNotFound(error: unknown): boolean {
+  return error instanceof Error
+    && (error.name === 'SessionPersistenceNotFoundError' || error.message.endsWith(' not found'))
+}
+
 /** Validate one JSON-RPC session id field. */
 function assertSessionId(method: string, value: string): SessionId {
   if (typeof value !== 'string' || value.length === 0) {
@@ -384,29 +390,48 @@ export class HarnessSdkJsonRpcServer {
   }
 
   /**
-   * Rename one live session by appending an explicit user title.
+   * Rename one session by appending an explicit user title.
    *
    * The title is durable session-log state (`session/title` with the `user`
    * source, folded by `@deepseek-ai/dsh-session-title`), not a client-local
-   * alias, so every front end sees it. Only a live session can be renamed: the
-   * title service appends to the live session instance, so a persisted session
-   * must be resumed first rather than written behind the owning writer's back.
+   * alias, so every front end sees it. A session that is not live here is
+   * brought live first: a persisted one is resumed (its recorded cwd is checked
+   * exactly as `session/resume` checks it), and an unknown id is created the
+   * same lazy way `session/prompt` creates it. That is what lets a front end
+   * rename a fresh session before its first prompt instead of failing "not
+   * live".
    * @param params - target session and the raw user title.
    * @returns the accepted, normalized title.
    */
-  renameSession(params: SessionRenameParams): SessionRenameResult {
+  async renameSession(params: SessionRenameParams): Promise<SessionRenameResult> {
     this.assertInitialized()
     const sessionId = assertSessionId('session/rename', params.sessionId)
-    const rec = this.sessions.get(sessionId)
-    if (rec === undefined) {
-      throw new Error(
-        `session "${sessionId}" is not live in this runtime; `
-        + 'resume it with session/resume before renaming',
-      )
-    }
+    const rec = await this.resolveSessionForRename(sessionId)
     this.assertLiveAgent(rec, sessionId)
     const accepted = this.sessionTitle().rename(rec.handle.agent.session, params.title)
     return { sessionId, title: accepted.title }
+  }
+
+  /**
+   * Bring a rename target live without creating a duplicate persisted session.
+   *
+   * Resume first: it reaches the persisted log when one exists and preserves
+   * the `session/resume` cwd contract. Only a genuinely absent id falls through
+   * to creation, mirroring `session/prompt`'s lazy creation.
+   */
+  private async resolveSessionForRename(sessionId: string): Promise<SessionRecord> {
+    const existing = this.sessions.get(sessionId)
+    if (existing !== undefined) return existing
+    try {
+      await this.resumeSession({ sessionId })
+    } catch (error) {
+      if (!isSessionNotFound(error)) throw error
+      return await this.getOrCreateSession(sessionId)
+    }
+    const rec = this.sessions.get(sessionId)
+    /* v8 ignore next -- resumeSession stores the record before it returns. */
+    if (rec === undefined) throw new Error(`session "${sessionId}" did not become live`)
+    return rec
   }
 
   private assertInitialized(): void {

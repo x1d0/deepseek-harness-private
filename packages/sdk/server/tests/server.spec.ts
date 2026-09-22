@@ -1383,10 +1383,13 @@ describe('session surface', () => {
       const event = session?.snapshotEvents().findLast(item => item.type === 'session/title')
       expect(event?.data).toMatchObject({ title: '新的 标题', source: { kind: 'user' } })
 
-      // Only live sessions are writable, and empty/blank titles are rejected by the title service.
-      expect(() => server.renameSession({ sessionId: 'unknown', title: 'x' })).toThrow(/not live/)
-      expect(() => server.renameSession({ sessionId: '', title: 'x' })).toThrow(/non-empty string/)
-      expect(() => server.renameSession({ sessionId: 'main', title: '   ' })).toThrow()
+      // A fresh id (never prompted) is materialized the same lazy way session/prompt does,
+      // so a front end can name a session before its first message.
+      await expect(server.renameSession({ sessionId: 'fresh', title: '新会话' }))
+        .resolves.toEqual({ sessionId: 'fresh', title: '新会话' })
+      // Empty ids and blank titles are still rejected.
+      await expect(server.renameSession({ sessionId: '', title: 'x' })).rejects.toThrow(/non-empty string/)
+      await expect(server.renameSession({ sessionId: 'main', title: '   ' })).rejects.toThrow()
       await server.shutdown()
     } finally {
       await ctx.fiber.dispose()
@@ -1405,7 +1408,34 @@ describe('session surface', () => {
       await server.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
       await server.prompt({ sessionId: 'main', contentBlocks: [{ type: 'text', text: 'first turn' }] })
       await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(1) })
-      expect(() => server.renameSession({ sessionId: 'main', title: 'x' })).toThrow(/requires the sessionTitle service/)
+      await expect(server.renameSession({ sessionId: 'main', title: 'x' }))
+        .rejects.toThrow(/requires the sessionTitle service/)
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('resumes a persisted session before renaming it', { timeout: 30_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-rename-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir)
+    try {
+      const seeding = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await seeding.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+      await seeding.prompt({ sessionId: 'kept', contentBlocks: [{ type: 'text', text: 'first turn' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(1) })
+      await seeding.shutdown()
+
+      const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await server.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+      // Not live in this server: rename resumes the persisted log instead of refusing.
+      await expect(server.renameSession({ sessionId: 'kept', title: '持久改名' }))
+        .resolves.toEqual({ sessionId: 'kept', title: '持久改名' })
+      expect(ctx.sessions.get(SessionId('kept'))).toBeDefined()
       await server.shutdown()
     } finally {
       await ctx.fiber.dispose()

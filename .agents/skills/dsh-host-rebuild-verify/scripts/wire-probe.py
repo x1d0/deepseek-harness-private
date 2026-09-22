@@ -331,6 +331,7 @@ def main() -> int:
                 tail.error if bad(tail) else f"{len(tail_events)} 条，truncated={tail.get('truncated')}")
         renamed = probe_method("A session/rename 可用", a, "session/rename",
                                {"sessionId": sid, "title": "  改名   试验  "}, new)
+        fresh_id = f"session-{uuid.uuid4().hex}"
         if new and isinstance(renamed, dict):
             rec("A rename 回被接受的规范化标题",
                 renamed.get("sessionId") == sid and renamed.get("title") == "改名 试验",
@@ -343,6 +344,16 @@ def main() -> int:
                 titled.error if bad(titled) else f"events={len(titled.get('events') or [])}")
             expect_error("A rename 空白标题被拒绝", a, "session/rename",
                          {"sessionId": sid, "title": "   "}, "visible")
+            # 回归：未 prompt 过的新 id 也能先改名（服务端会先把它创建出来）。
+            fresh = safe(lambda: a.call("session/rename", {"sessionId": fresh_id, "title": "新建会话名"}))
+            rec("A 未 prompt 过的新 id rename 也能成（先创建再改名）",
+                not bad(fresh) and (fresh or {}).get("title") == "新建会话名",
+                fresh.error if bad(fresh) else json.dumps(fresh, ensure_ascii=False))
+            fresh_hist = safe(lambda: a.call("session/history", {"sessionId": fresh_id}))
+            fresh_text = "" if bad(fresh_hist) else json.dumps(fresh_hist, ensure_ascii=False)
+            rec("A 新会话历史里有 title 事件",
+                not bad(fresh_hist) and '"session/title"' in fresh_text and "新建会话名" in fresh_text,
+                fresh_hist.error if bad(fresh_hist) else f"events={len(fresh_hist.get('events') or [])}")
         a.shutdown()
 
         # ---- 进程 B：新进程 resume 同一个会话，追问一轮，看上下文是否接上 ----
@@ -398,12 +409,13 @@ def main() -> int:
             expect_error("C session/history 未知 id 报错", c, "session/history",
                          {"sessionId": f"session-{uuid.uuid4().hex}"}, "")
             expect_error("C session/list limit=0 被拒绝", c, "session/list", {"limit": 0}, "limit")
-            expect_error("C 非活跃会话 rename 报错（先 resume）", c, "session/rename",
-                         {"sessionId": sid, "title": "x"}, "not live")
+            expect_error("C 换目录 rename 被拒（改名也先 resume，cwd 检查拦住）", c, "session/rename",
+                         {"sessionId": sid, "title": "x"}, "was created in")
             info_c = safe(lambda: c.call("session/list", {}))
             ids = [] if bad(info_c) else [e.get("sessionId") for e in (info_c.get("sessions") or [])]
-            rec("C 没有偷偷新建会话（列表里只有 A 建的那条）",
-                not bad(info_c) and ids == [sid], info_c.error if bad(info_c) else f"列表 {ids}")
+            rec("C 没有偷偷新建会话（列表里只有 A 建的）",
+                not bad(info_c) and set(ids) == {sid, fresh_id},
+                info_c.error if bad(info_c) else f"列表 {ids}")
             c.shutdown()
         else:
             a2 = Runtime("A2", home, project, base_url)
