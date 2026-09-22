@@ -88,8 +88,15 @@ npx vitest run packages/sdk/server/tests/server.spec.ts
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"   # 仓库根
-pnpm run build:lib:host
+CI=true pnpm run build:lib:host
 ```
+
+> **Termux 上必须带 `CI=true`。** pnpm 跑脚本前会做一次依赖状态检查（必要时先 `pnpm install`），
+> 而根 `postinstall`（`scripts/install-lefthook.mjs`）在这台机器上必挂：lefthook 没有
+> `lefthook-android-arm64` 二进制，`node_modules/.bin/lefthook install -f` 报
+> `Cannot find module 'lefthook-android-arm64/bin/lefthook'`。`CI=true` 让该脚本提前返回
+> （它和 lefthook 自己的 postinstall 都看 CI），install 与 `pnpm run` 才能过。
+> 不想改环境变量时，也可以绕过 pnpm 直接跑那两条命令（`node .../tsc -b ...` 与 `tsdown`）。
 
 它等于两步：
 
