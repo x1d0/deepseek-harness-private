@@ -50,6 +50,7 @@
  * - `FAKE_SESSION_LIST_JSON`: JSON array answered as `session/list` sessions (default `[]`).
  * - `FAKE_SESSION_HISTORY_JSON`: JSON object answered verbatim by `session/history`.
  * - `FAKE_RESUME_ERROR`: answer `session/resume` with a JSON-RPC error (unknown-id probe).
+ * - `FAKE_RENAME_ERROR`: answer `session/rename` with a JSON-RPC error (blank-title probe).
  * - `FAKE_MALFORMED_SESSION`: answer the three session-surface methods with `{}`.
  */
 
@@ -335,6 +336,23 @@ reader.on('line', (line) => {
         ? { session: { sessionId: sessionIdOf(frame.params), createdAt: 0 }, events: [], truncated: false }
         : JSON.parse(env.FAKE_SESSION_HISTORY_JSON))
       return
+    case 'session/rename': {
+      if (env.FAKE_RENAME_ERROR !== undefined) {
+        write({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32603, message: 'session title must contain visible characters' },
+        })
+        return
+      }
+      if (env.FAKE_MALFORMED_SESSION !== undefined) {
+        respond({})
+        return
+      }
+      const title = (frame.params as { title?: unknown } | undefined)?.title
+      respond({ sessionId: sessionIdOf(frame.params), title: typeof title === 'string' ? title.trim() : '' })
+      return
+    }
     case 'session/resume': {
       if (env.FAKE_RESUME_ERROR !== undefined) {
         write({

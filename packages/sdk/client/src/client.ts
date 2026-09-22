@@ -25,6 +25,8 @@ import {
   type SessionListParams,
   type SessionListResult,
   type SessionPromptParams,
+  type SessionRenameParams,
+  type SessionRenameResult,
   type SessionResumeParams,
   type SessionResumeResult,
   type SdkPromptContentBlock,
@@ -357,6 +359,24 @@ export class HarnessClient {
       throw new SdkProtocolError(`session/resume returned no resume verdict: ${JSON.stringify(result)}`)
     }
     return { sessionId: result.sessionId, resumed: result.resumed }
+  }
+
+  /**
+   * Rename one live session by appending an explicit user-owned title.
+   *
+   * The title is durable session state every front end reads, not a
+   * client-local alias. The runtime only accepts a session live in its own
+   * process, so a persisted session must be resumed first; a blank title is a
+   * JSON-RPC error.
+   * @param params - the live session and the raw user title.
+   * @returns the accepted, normalized title.
+   */
+  async renameSession(params: SessionRenameParams): Promise<SessionRenameResult> {
+    const result = await this.request('session/rename', { ...params })
+    if (!isRecord(result) || typeof result.sessionId !== 'string' || typeof result.title !== 'string') {
+      throw new SdkProtocolError(`session/rename returned no accepted title: ${JSON.stringify(result)}`)
+    }
+    return { sessionId: result.sessionId, title: result.title }
   }
 
   /**

@@ -329,6 +329,20 @@ def main() -> int:
             rec("A session/history limit 生效并标 truncated",
                 not bad(tail) and len(tail_events) == 3 and tail.get("truncated") is True,
                 tail.error if bad(tail) else f"{len(tail_events)} 条，truncated={tail.get('truncated')}")
+        renamed = probe_method("A session/rename 可用", a, "session/rename",
+                               {"sessionId": sid, "title": "  改名   试验  "}, new)
+        if new and isinstance(renamed, dict):
+            rec("A rename 回被接受的规范化标题",
+                renamed.get("sessionId") == sid and renamed.get("title") == "改名 试验",
+                json.dumps(renamed, ensure_ascii=False))
+            titled = safe(lambda: a.call("session/history", {"sessionId": sid}))
+            titled_text = "" if bad(titled) else json.dumps(titled, ensure_ascii=False)
+            rec("A rename 落成用户来源的 title 事件",
+                not bad(titled) and '"session/title"' in titled_text
+                and '"kind": "user"' in titled_text and "改名 试验" in titled_text,
+                titled.error if bad(titled) else f"events={len(titled.get('events') or [])}")
+            expect_error("A rename 空白标题被拒绝", a, "session/rename",
+                         {"sessionId": sid, "title": "   "}, "visible")
         a.shutdown()
 
         # ---- 进程 B：新进程 resume 同一个会话，追问一轮，看上下文是否接上 ----
@@ -384,6 +398,8 @@ def main() -> int:
             expect_error("C session/history 未知 id 报错", c, "session/history",
                          {"sessionId": f"session-{uuid.uuid4().hex}"}, "")
             expect_error("C session/list limit=0 被拒绝", c, "session/list", {"limit": 0}, "limit")
+            expect_error("C 非活跃会话 rename 报错（先 resume）", c, "session/rename",
+                         {"sessionId": sid, "title": "x"}, "not live")
             info_c = safe(lambda: c.call("session/list", {}))
             ids = [] if bad(info_c) else [e.get("sessionId") for e in (info_c.get("sessions") or [])]
             rec("C 没有偷偷新建会话（列表里只有 A 建的那条）",

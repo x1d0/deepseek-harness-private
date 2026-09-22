@@ -169,6 +169,22 @@ export interface SessionResumeResult {
   resumed: boolean
 }
 
+/** Parameters for `session/rename`. */
+export interface SessionRenameParams {
+  /** Live session to rename; a persisted-but-not-live session must be resumed first. */
+  sessionId: string
+  /** Raw user title; the title service normalizes and rejects non-visible input. */
+  title: string
+}
+
+/** `session/rename` result. */
+export interface SessionRenameResult {
+  /** The renamed session id (echo of the request). */
+  sessionId: string
+  /** The accepted, normalized title as folded from the appended event. */
+  title: string
+}
+
 /** Server-to-client notifications by JSON-RPC method name. */
 export interface HarnessSdkNotificationMap {
   'session.event': SessionEventNotification
@@ -184,5 +200,6 @@ export interface HarnessSdkRequestMap {
   'session/list': { params: SessionListParams; result: SessionListResult }
   'session/history': { params: SessionHistoryParams; result: SessionHistoryResult }
   'session/resume': { params: SessionResumeParams; result: SessionResumeResult }
+  'session/rename': { params: SessionRenameParams; result: SessionRenameResult }
   'shutdown': { params: undefined; result: Record<string, never> }
 }

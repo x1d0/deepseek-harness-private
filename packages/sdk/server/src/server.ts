@@ -13,7 +13,7 @@ import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-ag
 import { admitEncodedImages, type EncodedImageAttachment, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, ReasoningEffortId, type ContentBlock, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf, type Scoped } from '@deepseek-ai/dsh-scope'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
@@ -29,6 +29,8 @@ import type {
   SessionListResult,
   SessionPromptParams,
   SessionPromptResult,
+  SessionRenameParams,
+  SessionRenameResult,
   SessionResumeParams,
   SessionResumeResult,
   SdkEncodedImageBlock,
@@ -38,6 +40,19 @@ import type {
 
 interface SessionRecord {
   handle: AgentHandle
+}
+
+/**
+ * The slice of the deployment's `sessionTitle` service this server writes.
+ *
+ * Declared structurally for the same reason as {@link SessionQueryReader}: the
+ * service is not a declared dependency, so an `sdk-minimal` deployment where
+ * `@deepseek-ai/dsh-session-title` is absent still boots — only
+ * `session/rename` fails there, with a message naming the missing service.
+ */
+interface SessionTitleWriter {
+  /** Append an explicit user title to one live session and fold the result. */
+  rename(session: Session, title: string): { readonly title: string }
 }
 
 /**
@@ -368,8 +383,46 @@ export class HarnessSdkJsonRpcServer {
     return { sessionId, resumed: true }
   }
 
+  /**
+   * Rename one live session by appending an explicit user title.
+   *
+   * The title is durable session-log state (`session/title` with the `user`
+   * source, folded by `@deepseek-ai/dsh-session-title`), not a client-local
+   * alias, so every front end sees it. Only a live session can be renamed: the
+   * title service appends to the live session instance, so a persisted session
+   * must be resumed first rather than written behind the owning writer's back.
+   * @param params - target session and the raw user title.
+   * @returns the accepted, normalized title.
+   */
+  renameSession(params: SessionRenameParams): SessionRenameResult {
+    this.assertInitialized()
+    const sessionId = assertSessionId('session/rename', params.sessionId)
+    const rec = this.sessions.get(sessionId)
+    if (rec === undefined) {
+      throw new Error(
+        `session "${sessionId}" is not live in this runtime; `
+        + 'resume it with session/resume before renaming',
+      )
+    }
+    this.assertLiveAgent(rec, sessionId)
+    const accepted = this.sessionTitle().rename(rec.handle.agent.session, params.title)
+    return { sessionId, title: accepted.title }
+  }
+
   private assertInitialized(): void {
     if (!this.initialized) throw new Error('SDK server is not initialized')
+  }
+
+  /** Write to the deployment's session-title service, or explain what is missing. */
+  private sessionTitle(): SessionTitleWriter {
+    const service = (this.ctx as unknown as { get(key: string): unknown }).get('sessionTitle')
+    if (service === undefined) {
+      throw new Error(
+        'session/rename requires the sessionTitle service, which this deployment does not mount '
+        + '(dsh-base provides it; sdk-minimal does not)',
+      )
+    }
+    return service as SessionTitleWriter
   }
 
   /** Read the deployment's session corpus service, or explain what is missing. */
@@ -449,6 +502,8 @@ export class HarnessSdkJsonRpcServer {
         return this.sessionHistory(params as unknown as SessionHistoryParams)
       case 'session/resume':
         return this.resumeSession(params as unknown as SessionResumeParams)
+      case 'session/rename':
+        return this.renameSession(params as unknown as SessionRenameParams)
       case 'shutdown':
         return this.shutdown()
       default:

@@ -23,6 +23,7 @@ from .models import (
     Notification,
     SessionHistoryResult,
     SessionListResult,
+    SessionRenameResult,
     SessionResumeResult,
 )
 
@@ -226,6 +227,14 @@ class HarnessClient:
             "session/resume",
             {"sessionId": session_id},
             response_model=SessionResumeResult,
+        )
+
+    def rename_session(self, session_id: str, title: str) -> SessionRenameResult:
+        """Rename one live session; the runtime rejects a non-live id or a blank title."""
+        return self.request(
+            "session/rename",
+            {"sessionId": session_id, "title": title},
+            response_model=SessionRenameResult,
         )
 
     def request(

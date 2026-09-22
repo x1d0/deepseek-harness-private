@@ -1188,6 +1188,12 @@ for line in sys.stdin:
         first = session_id not in resumed
         resumed.add(session_id)
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": session_id, "resumed": first}}), flush=True)
+    elif method == "session/rename":
+        title = params["title"].strip()
+        if not title:
+            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "session title must contain visible characters"}}), flush=True)
+            continue
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": params["sessionId"], "title": title}}), flush=True)
     elif method == "shutdown":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
         break
@@ -1219,6 +1225,19 @@ def test_client_mirrors_the_session_surface_requests(tmp_path: Path) -> None:
         assert client.resume_session("session-a").resumed is True
         assert client.resume_session("session-a").resumed is False
 
+        renamed = client.rename_session("session-a", "  new  name  ")
+        assert renamed.sessionId == "session-a"
+        assert renamed.title == "new  name"
+
+
+def test_client_propagates_a_session_rename_refusal(tmp_path: Path) -> None:
+    with HarnessClient(_launch_args=(sys.executable, str(_session_surface_bridge(tmp_path)))) as client:
+        client.initialize(provider="deepseek-official", cwd="/workspace", model="dsagent")
+        with pytest.raises(JsonRpcError) as refusal:
+            client.rename_session("session-a", "   ")
+    assert refusal.value.code == -32603
+    assert "visible characters" in refusal.value.message
+
 
 def test_client_propagates_a_session_resume_refusal(tmp_path: Path) -> None:
     with HarnessClient(_launch_args=(sys.executable, str(_session_surface_bridge(tmp_path)))) as client:
@@ -1238,3 +1257,5 @@ def test_high_level_session_surface_mirrors_the_wire(tmp_path: Path) -> None:
         assert harness.resume_session("session-a").resumed is True
         # The session handle resumes its own id: already live, so this is the idempotent repeat.
         assert harness.start_session("session-a").resume() is False
+        # The session handle also renames its own id.
+        assert harness.start_session("session-a").rename("renamed") == "renamed"

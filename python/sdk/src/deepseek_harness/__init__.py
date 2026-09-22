@@ -11,6 +11,7 @@ from .models import (
     SessionHistoryResult,
     SessionListEntry,
     SessionListResult,
+    SessionRenameResult,
     SessionResumeResult,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "SessionHistoryResult",
     "SessionListEntry",
     "SessionListResult",
+    "SessionRenameResult",
     "SessionResumeResult",
 ]

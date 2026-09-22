@@ -14,6 +14,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import SubagentRuntime, { type SubagentResult, type SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import type { JsonRpcTransportPeer } from '@deepseek-ai/dsh-sdk-protocol'
@@ -58,12 +59,15 @@ async function mockCompletionServer(): Promise<{ url: string; requests: unknown[
   return { url: `http://127.0.0.1:${address.port}`, requests, headers }
 }
 
-async function makeHarness(storageDir: string) {
+async function makeHarness(storageDir: string, withTitles = true) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(JsonlSessionPersistence, { root: storageDir })
+  if (withTitles) {
+    await ctx.plugin(SessionTitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 })
+  }
   await new Promise(resolve => setTimeout(resolve, 50))
   return ctx
 }
@@ -1357,6 +1361,55 @@ describe('session surface', () => {
       await ctx.fiber.dispose()
       await rm(storageDir, { recursive: true, force: true })
       await rm(otherDir, { recursive: true, force: true })
+    }
+  })
+
+  it('renames a live session with a durable user-source title event', { timeout: 30_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-rename-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir)
+    try {
+      const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await server.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+      await server.prompt({ sessionId: 'main', contentBlocks: [{ type: 'text', text: 'first turn' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(1) })
+
+      // The title is normalized and stored as a durable event, not a client alias.
+      await expect(server.handleRequest('session/rename', { sessionId: 'main', title: '  新的   标题  ' }))
+        .resolves.toEqual({ sessionId: 'main', title: '新的 标题' })
+      const session = ctx.sessions.get(SessionId('main'))
+      const event = session?.snapshotEvents().findLast(item => item.type === 'session/title')
+      expect(event?.data).toMatchObject({ title: '新的 标题', source: { kind: 'user' } })
+
+      // Only live sessions are writable, and empty/blank titles are rejected by the title service.
+      expect(() => server.renameSession({ sessionId: 'unknown', title: 'x' })).toThrow(/not live/)
+      expect(() => server.renameSession({ sessionId: '', title: 'x' })).toThrow(/non-empty string/)
+      expect(() => server.renameSession({ sessionId: 'main', title: '   ' })).toThrow()
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('explains the missing title service instead of failing obscurely', { timeout: 30_000 }, async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-rename-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir, false)
+    try {
+      const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+      await server.initialize({ cwd: storageDir, provider: 'deepseek-official', model: 'plain-model' })
+      await server.prompt({ sessionId: 'main', contentBlocks: [{ type: 'text', text: 'first turn' }] })
+      await vi.waitFor(() => { expect(llmServer.requests).toHaveLength(1) })
+      expect(() => server.renameSession({ sessionId: 'main', title: 'x' })).toThrow(/requires the sessionTitle service/)
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
     }
   })
 })

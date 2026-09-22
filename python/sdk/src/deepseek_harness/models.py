@@ -60,3 +60,8 @@ class SessionHistoryResult(BaseModel):
 class SessionResumeResult(BaseModel):
     sessionId: str
     resumed: bool
+
+
+class SessionRenameResult(BaseModel):
+    sessionId: str
+    title: str

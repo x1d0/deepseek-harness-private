@@ -773,10 +773,25 @@ describe('session surface', () => {
       .rejects.toThrow(/session-missing not found/)
   })
 
+  it('renames a live session and returns the accepted title', async () => {
+    const harness = harnessWith()
+    await expect(harness.renameSession({ sessionId: 'session-a', title: '  new  name  ' }))
+      .resolves.toEqual({ sessionId: 'session-a', title: 'new  name' })
+    // The session handle exposes the same call for its own id.
+    await expect(harness.session('session-a').rename('another')).resolves.toBe('another')
+  })
+
+  it('propagates the runtime refusal to accept a blank title', async () => {
+    const harness = harnessWith({ FAKE_RENAME_ERROR: '1' })
+    await expect(harness.renameSession({ sessionId: 'session-a', title: '   ' }))
+      .rejects.toThrow(/visible characters/)
+  })
+
   it('rejects a malformed session-surface payload as a protocol error', async () => {
     const harness = harnessWith({ FAKE_MALFORMED_SESSION: '1' })
     await expect(harness.listSessions()).rejects.toThrow(SdkProtocolError)
     await expect(harness.sessionHistory({ sessionId: 'session-a' })).rejects.toThrow(SdkProtocolError)
     await expect(harness.resumeSession({ sessionId: 'session-a' })).rejects.toThrow(SdkProtocolError)
+    await expect(harness.renameSession({ sessionId: 'session-a', title: 'x' })).rejects.toThrow(SdkProtocolError)
   })
 })

@@ -166,7 +166,7 @@ grep -c "session/list"   packages/sdk/protocol/lib/types/types.d.ts   # 期望 >
 python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode new
 ```
 
-- **通过判据：退出码 0，末尾 `== 24/24 通过（模式 new）==`，且没有 FAIL 清单。**
+- **通过判据：退出码 0，末尾 `== 29/29 通过（模式 new）==`，且没有 FAIL 清单。**
 - 失败时加 `--keep` 保留临时目录（里面有子进程 stderr）；探针也会把 stderr 尾部带进失败信息。
 - 想复现"重建前基线"：`python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode old`（应 7/7 通过，
   其中三条是 `unknown ... method`）。**这个基线已经实测通过**，说明脚本本身没问题；
@@ -185,7 +185,7 @@ python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode new
 | C 在**别的目录** `initialize` 后 resume | 换目录被拒绝（错误信息含 `was created in`）——不把历史描述不到的地方当执行目录 |
 | C 其余负例 | 未知 id resume 报错（**绝不偷偷新建**）；空 id / 未知 id 的 history 报错；`limit=0` 报错；C 进程没有偷偷建会话 |
 
-### 全过时应该看到的 24 条（逐字）
+### 全过时应该看到的 29 条（逐字）
 
 ```
 A initialize
@@ -200,6 +200,10 @@ A 历史里有事件且不截断
 A 历史里能找到第一轮文本
 A 历史返回会话身份
 A session/history limit 生效并标 truncated
+A session/rename 可用
+A rename 回被接受的规范化标题
+A rename 落成用户来源的 title 事件
+A rename 空白标题被拒绝
 B session/resume 可用
 B resume 报告 resumed=true
 B 重复 resume 幂等（resumed=false）
@@ -211,6 +215,7 @@ C 未知会话 resume 报错（绝不偷偷新建）
 C session/history 空 id 被拒绝
 C session/history 未知 id 报错
 C session/list limit=0 被拒绝
+C 非活跃会话 rename 报错（先 resume）
 C 没有偷偷新建会话（列表里只有 A 建的那条）
 ```
 
@@ -252,15 +257,16 @@ stat -c '%y' packages/sdk/server/lib/index.js
 
 ## 8. 判据（什么算"过"）
 
-1. 单元：`Tests 37 passed`
-2. 产物：`server/lib/index.js` 里 `session/list`/`session/resume` 各 ≥1，
+1. 单元：`Tests 39 passed`
+2. 产物：`server/lib/index.js` 里 `session/list`/`session/resume`/`session/rename` 各 ≥1，
    且 `protocol/lib/types/types.d.ts` 里有 `'session/list'`（协议是类型，只在 .d.ts 里）
-3. 线协议：`--mode new` 24/24、退出码 0，且这几条必须在里面：
+3. 线协议：`--mode new` 29/29、退出码 0，且这几条必须在里面：
    - `A session/list 含本会话`
    - `A session/history limit 生效并标 truncated`
    - `B resume 报告 resumed=true` 与 `B 重复 resume 幂等（resumed=false）`
    - **`B 续接真的带着上一轮上下文（模型请求里有 MARK-ONE）`** ← 续接非伪造的硬证据
    - `C 换目录 resume 被拒绝（不把工具跑错地方）`
+   - `A rename 落成用户来源的 title 事件` ← 改名非客户端别名的硬证据
 
 任一条不过：**保留原始输出并停下报告**，不要"修测试"、不要顺手改语义去迁就现象。
 
@@ -282,6 +288,8 @@ stat -c '%y' packages/sdk/server/lib/index.js
 | `session/list` | `{cwd?, limit?}` | `{sessions:[{sessionId, cwd?, createdAt, title?, live, persisted}]}` | 最新在前；`cwd` 为精确匹配过滤；`limit` 需正整数 |
 | `session/history` | `{sessionId, limit?}` | `{session: SessionDescriptor, events, truncated}` | `events` 与 `session.event` 通知同一套词汇；`limit` 取**最新 N 条**并置 `truncated`；未知 id 报错 |
 | `session/resume` | `{sessionId}` | `{sessionId, resumed}` | **绝不新建**（未知 id 报错）；已 live 则 `resumed=false`；cwd 不匹配先 dispose 再拒绝；**不重放历史**（要历史自己调 `session/history`） |
+| `session/rename` | `{sessionId, title}` | `{sessionId, title}` | 只接受本 runtime 内**活跃**的会话（否则报 not live，先 `session/resume`）；通过 `sessionTitle` 服务追加 `user` 来源的 `session/title` 事件；空白标题报 `must contain visible characters` |
 
-三方法都要求先 `initialize`（否则报 `SDK server is not initialized`）。
+四方法都要求先 `initialize`（否则报 `SDK server is not initialized`）。
 `session/list` / `session/history` 依赖部署挂载 `sessionQuery`——`dsh-base` 提供，`sdk-minimal` 不提供。
+`session/rename` 依赖 `sessionTitle`，同样由 `dsh-base` 提供（只接受活跃会话）。

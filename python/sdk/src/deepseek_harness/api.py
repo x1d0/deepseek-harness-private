@@ -12,6 +12,7 @@ from .models import (
     Notification,
     SessionHistoryResult,
     SessionListResult,
+    SessionRenameResult,
     SessionResumeResult,
 )
 
@@ -148,6 +149,10 @@ class DeepSeekHarness:
         self.start()
         return self._client.resume_session(session_id)
 
+    def rename_session(self, session_id: str, title: str) -> SessionRenameResult:
+        self.start()
+        return self._client.rename_session(session_id, title)
+
 
 class Session:
     def __init__(self, harness: DeepSeekHarness, session_id: str) -> None:
@@ -157,6 +162,10 @@ class Session:
     def resume(self) -> bool:
         self.harness.start()
         return self.harness.client.resume_session(self.id).resumed
+
+    def rename(self, title: str) -> str:
+        """Rename this live session; resume a persisted one first."""
+        return self.harness.rename_session(self.id, title).title
 
     def run(
         self,

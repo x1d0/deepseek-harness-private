@@ -26,6 +26,8 @@ export type {
   SessionListEntry,
   SessionListParams,
   SessionListResult,
+  SessionRenameParams,
+  SessionRenameResult,
   SessionResumeParams,
   SessionResumeResult,
 } from '@deepseek-ai/dsh-sdk-protocol'

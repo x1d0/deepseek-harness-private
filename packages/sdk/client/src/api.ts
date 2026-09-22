@@ -14,6 +14,8 @@ import type {
   SessionHistoryResult,
   SessionListParams,
   SessionListResult,
+  SessionRenameParams,
+  SessionRenameResult,
   SessionResumeParams,
   SessionResumeResult,
 } from '@deepseek-ai/dsh-sdk-protocol'
@@ -154,6 +156,19 @@ export class DeepSeekHarness implements AsyncDisposable {
   }
 
   /**
+   * Rename one live session through the runtime's session-title service.
+   *
+   * Only a session live in the runtime can be renamed; pass a persisted one to
+   * {@link resumeSession} (or {@link HarnessSession.resume}) first.
+   * @param params - the live session and the raw user title.
+   * @returns the accepted, normalized title.
+   */
+  async renameSession(params: SessionRenameParams): Promise<SessionRenameResult> {
+    await this.start()
+    return this.client.renameSession(params)
+  }
+
+  /**
    * Shut down and reap the runtime subprocess. Idempotent and terminal —
    * a closed harness no longer retries a failed handshake.
    * @returns settlement of the complete teardown.
@@ -214,6 +229,17 @@ export class HarnessSession {
     await this.harness.start()
     const result = await this.harness.client.resumeSession({ sessionId: this.id })
     return result.resumed
+  }
+
+  /**
+   * Rename this session (the runtime must own it; call {@link resume} first
+   * for a persisted one).
+   * @param title - raw user title; the runtime normalizes and rejects blanks.
+   * @returns the accepted, normalized title.
+   */
+  async rename(title: string): Promise<string> {
+    const result = await this.harness.renameSession({ sessionId: this.id, title })
+    return result.title
   }
 
   /**

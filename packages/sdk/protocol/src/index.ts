@@ -25,6 +25,8 @@ export type {
   SessionListEntry,
   SessionListParams,
   SessionListResult,
+  SessionRenameParams,
+  SessionRenameResult,
   SessionResumeParams,
   SessionResumeResult,
   SessionStatusNotification,
