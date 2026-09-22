@@ -4,7 +4,7 @@ description: "How to make a source change in this repo actually take effect (hos
 version: 1.0.0
 author: xi-dsh deployment notes
 license: MIT
-platforms: [linux, macos]
+platforms: [linux, macos, android]
 metadata:
   hermes:
     tags: [DeepSeek-Harness, Build, SDK, Wire-Protocol, Verification, Termux, Mock-LLM]
@@ -19,16 +19,17 @@ metadata:
 - 要证明某个 SDK 方法（`session/*`、`initialize`、`shutdown`）在**真实 dsh 进程**上按契约工作，
   而且不想花 token —— 用 `scripts/wire-probe.py`（自起 mock LLM + 临时 `DSH_HOME`）。
 
-以下正文最初是为「SDK 会话三方法」这次改动写的，但 §4 的副作用机制、§5 的验证方法、
-§7 的排查表对**任何 host 侧改动**都适用；那三个方法只是完整的实例。
+以下正文最初是为「SDK 会话三方法」这次改动写的（现已扩到第四个 `session/rename`），
+但 §4 的副作用机制、§5 的验证方法、§7 的排查表对**任何 host 侧改动**都适用；
+那几个方法只是完整的实例。
 
 这份文档给**执行者**（另一个 agent 或人）：在本仓库里把改动**编译进运行时产物**，然后跑线协议验证。
 全部命令可直接复制。改动的设计已经定稿，**不要改语义**；发现设计问题就写进报告，别顺手改。
 
-- 目的：证明三个新方法在**真实 dsh 进程**上按设计工作（不是只过单元测试）。
-- 不做：不改协议语义、不动客户端镜像（那部分已完成，见 §9）。
+- 目的：证明这些 `session/*` 方法在**真实 dsh 进程**上按设计工作（不是只过单元测试）。
+- 不做：不改协议语义（客户端镜像与中英文档要跟着一起更新，见 §9）。
 - 成本：不花 token（用 mock LLM），不需要 API key。
-- 预计耗时：单元测试 < 1 min；重建几分钟；线协议验证 2–4 min。
+- 预计耗时：单元测试 < 1 min；重建约 1–2 min；线协议验证 2–4 min。
 
 ---
 
@@ -52,22 +53,17 @@ metadata:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"   # 仓库根
-git rev-parse --abbrev-ref HEAD   # 期望 feat/sdk-session-surface
-git log --oneline -3              # 期望 8a936c6f22 / fc34499892 / 1ba1256bee
-git status --porcelain            # 期望为空
+git status --porcelain            # 期望为空（lib/ 被 gitignore，不进这里）
 node -v; pnpm -v
 ```
 
-期望的三个提交：
-
-| 提交 | 内容 |
-|---|---|
-| `fc34499892` | protocol + server + 单测：三个新方法 |
-| `8a936c6f22` | protocol README 文档 |
-| `1ba1256bee` | （基线）termux 部署产物 |
+> 本 skill 首次成文时在一个专门分支（`feat/sdk-session-surface`，提交
+> `fc34499892`/`8a936c6f22`/`1ba1256bee`）上做那三个方法；那批提交早已合入 `master`，
+> 后续改动会另开分支（例如 `feat/sdk-session-rename`）。**别把具体分支名/提交号当硬前置**
+> ——工作树干净就能开工。
 
 工作树不干净就先弄清是什么：`lib/` 已被 `.gitignore` 忽略，不会出现在 `git status` 里，
-所以任何未跟踪文件都值得看一眼。分支不对就 `git checkout feat/sdk-session-surface`。
+所以任何未跟踪文件都值得看一眼。
 
 ---
 
@@ -78,7 +74,7 @@ cd "$(git rev-parse --show-toplevel)"   # 仓库根
 npx vitest run packages/sdk/server/tests/server.spec.ts
 ```
 
-期望：`Tests  37 passed`（新加的 5 条在 `describe('session surface')`）。
+期望：全过（写这份时 39 条；每加一个方法都会涨）。
 
 这步走 `src/`，**它过了不代表运行时更新了**——那是步骤 2 的事。别把这一步当验证完成。
 
@@ -93,7 +89,7 @@ CI=true pnpm run build:lib:host
 
 > **Termux 上必须带 `CI=true`。** pnpm 跑脚本前会做一次依赖状态检查（必要时先 `pnpm install`），
 > 而根 `postinstall`（`scripts/install-lefthook.mjs`）在这台机器上必挂：lefthook 没有
-> `lefthook-android-arm64` 二进制，`node_modules/.bin/lefthook install -f` 报
+> `lefthook-android-arm64` 二进制，`node_modules/.bin/lefthook install --force` 报
 > `Cannot find module 'lefthook-android-arm64/bin/lefthook'`。`CI=true` 让该脚本提前返回
 > （它和 lefthook 自己的 postinstall 都看 CI），install 与 `pnpm run` 才能过。
 > 不想改环境变量时，也可以绕过 pnpm 直接跑那两条命令（`node .../tsc -b ...` 与 `tsdown`）。
@@ -105,7 +101,7 @@ CI=true pnpm run build:lib:host
 2. `tsdown --env.DSH_BUILD_FACE host`
    —— 把 `<pkg>/lib/types/index.js` 打成 `<pkg>/lib/index.js`（`exports` 指向的就是它），并跑 typert 插件
 
-期望：退出码 0。打包这步会扫 workspace 里所有包，**分钟量级**；脚本自己要 4 GB 堆，
+期望：退出码 0。打包这步会扫 workspace 里所有包（本机 host+client 约 1–2 分钟）；脚本自己要 4 GB 堆，
 本机内存紧时别同时跑别的重活。
 
 ### ⚠️ 副作用：机制与正确姿势（2026-09-21 实测复盘）
@@ -151,10 +147,13 @@ stat -c '%y' packages/sdk/server/lib/index.js    # 产物时间 T
 cd "$(git rev-parse --show-toplevel)"   # 仓库根
 grep -c "session/list"   packages/sdk/server/lib/index.js      # 期望 >= 1
 grep -c "session/resume" packages/sdk/server/lib/index.js      # 期望 >= 1
+grep -c "session/rename" packages/sdk/server/lib/index.js      # 期望 >= 1
 grep -c "session/list"   packages/sdk/protocol/lib/types/types.d.ts   # 期望 >= 1
+grep -c "session/rename" packages/sdk/protocol/lib/types/types.d.ts   # 期望 >= 1
+# 改了客户端镜像再查方法名（如 renameSession）在 packages/sdk/client/lib/index.js 里 >= 1
 ```
 
-> 第三个 grep 看的是 `.d.ts`，不是 `protocol/lib/index.js`：协议包里能被运行时加载的只剩
+> 查 `.d.ts` 的那几条 grep 看的是声明文件，不是 `protocol/lib/index.js`：协议包里能被运行时加载的只剩
 > transport（`lib/index.js` 的导出是 `JsonRpcLineTransport` / `JsonRpcResponseError`），
 > 请求表 `HarnessSdkRequestMap` 是**类型**，编译后擦除，名字只留在声明文件里。
 > **`protocol/lib/index.js` grep 出 0 是正常的，不是构建失败。**
@@ -175,8 +174,8 @@ python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode new
 
 - **通过判据：退出码 0，末尾 `== 29/29 通过（模式 new）==`，且没有 FAIL 清单。**
 - 失败时加 `--keep` 保留临时目录（里面有子进程 stderr）；探针也会把 stderr 尾部带进失败信息。
-- 想复现"重建前基线"：`python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode old`（应 7/7 通过，
-  其中三条是 `unknown ... method`）。**这个基线已经实测通过**，说明脚本本身没问题；
+- 想复现"重建前基线"：`python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode old`
+  （应全过；old 模式下每个 `session/*` 探针都应回 `unknown ... method`）。**这个基线已经实测通过**，说明脚本本身没问题；
   如果 `--mode old` 都不通过，先怀疑环境（dsh 启动器指向哪、checkout 是哪份），别怀疑设计。
 
 ### 探针逐步在验什么
@@ -186,6 +185,7 @@ python3 .agents/skills/dsh-host-rebuild-verify/scripts/wire-probe.py --mode new
 | A `initialize` + `session/prompt` + 等 `session.status: idle` | 基线：真运行时、真回合、mock 回复真的到达 |
 | A `session/list` | 方法存在；本会话在列表里且字段齐全（`createdAt`/`live`/`persisted`）；`cwd` 过滤生效 |
 | A `session/history` | 方法存在；事件非空、不截断；能在事件里找到第一轮文本；`limit` 取最新 N 条并标 `truncated`；返回 `session` 身份 |
+| A `session/rename` | 方法存在；返回规范化后的标题；历史里出现 `user` 来源的 `session/title` 事件；空白标题被拒 |
 | A 关闭 → B 新进程 `session/resume` | 跨进程续接：`resumed=true`；重复调用幂等（`resumed=false`） |
 | B 追问一轮 + 读 mock 落盘的请求体 | **续接不是伪造**：第二轮模型请求里真的带着第一轮的 `MARK-ONE` |
 | B `session/history` | 续接后的历史含两轮（`MARK-ONE` 与 `MARK-TWO` 都在） |
@@ -251,7 +251,7 @@ stat -c '%y' packages/sdk/server/lib/index.js
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| 三方法仍回 `unknown ... method` | 没重建 / 只跑了 tsc / 运行时加载的是另一份副本 | 重跑 §4 并做产物自检；`cat "$(command -v dsh)"` 确认 `DSH_REPO` 指向这个 checkout |
+| 这些 `session/*` 方法仍回 `unknown ... method` | 没重建 / 只跑了 tsc / 运行时加载的是另一份副本 | 重跑 §4 并做产物自检；`cat "$(command -v dsh)"` 确认 `DSH_REPO` 指向这个 checkout |
 | `session/list` 回 "requires the sessionQuery service" | 用了不挂 `sessionQuery` 的 profile（如 `sdk-minimal`） | 用 `--profile sdk`（= `dsh-base` + `dsh-sdk-app`，base 挂 `session-query-sqlite`） |
 | resume 回 `was created in ... but this runtime is initialized for ...` | cwd 与日志 header 不一致 | **设计如此**。探针 A/B 用同一目录；C 上这条是**预期拒绝** |
 | resume 回 `session "..." already exists` | 撞上旧行为：跑的还是旧产物 | 重跑 §4 |
@@ -279,11 +279,12 @@ stat -c '%y' packages/sdk/server/lib/index.js
 
 ---
 
-## 9. 本次改动的边界（已更新）
+## 9. 本类改动的边界（已更新）
 
-- **客户端镜像已经做完了**：`packages/sdk/client`（TS）与 `python/sdk`（Python）都镜像了三个方法，
-  各自扩了脚本化替身与用例；协议 README 的中英配对已重录（`verify-translation-pairing --write`）。
-- xi 侧接入也已完成（`--resume [ID]` 真续接、`/switch` 接磁盘会话、并发多会话）。
+- **客户端镜像要跟着一起做**：`packages/sdk/client`（TS）与 `python/sdk`（Python）都镜像新方法，
+  各自扩脚本化替身与用例；改了协议 README 就用 `verify-translation-pairing --write` 重录中英配对。
+  （`session/list`/`history`/`resume`/`rename` 四方法都已镜像过，后续加方法照做。）
+- xi 侧接入也已完成（`--resume [ID]` 真续接、`/switch` 接磁盘会话、并发多会话、`/rename`/`/title`）。
 - **仍然不在范围内**：给上游提 PR（本仓库是 termux 部署线，不跟上游合并）。
 - **不推送**任何分支之前先问：本仓库的推送会触发上游那整套 CI（见 skill
   `github-actions-cost`；本仓库公开后标准 runner 免费，但 heavy 矩阵仍会占队列）。
